@@ -2,10 +2,10 @@
 #
 # setup.sh -- bootstrap the yt-remixer "rmx" tool on a fresh machine.
 #
-# Installs dependencies (yt-dlp, jq, curl, python3, git), sets up the
-# youtube-upload CLI in its own venv, writes client_secrets.json from a
-# YouTube OAuth client id/secret you supply, generates rmx.sh, and adds
-# the `rmx` shell shortcut to your shell rc file.
+# Installs dependencies (yt-dlp, ffmpeg, jq, curl, python3, git), sets up the
+# youtube-upload CLI in its own venv, patches its dead OAuth flow, imports a
+# YouTube OAuth client JSON downloaded from the Google Cloud console,
+# generates rmx.sh, and adds the `rmx` shell shortcut to your shell rc file.
 #
 # Usage:  ./setup.sh
 #
@@ -19,6 +19,39 @@ CONSOLE_URL="https://console.cloud.google.com/apis/dashboard"
 say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m warn:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Ask on the terminal rather than on stdin.
+#
+# If setup.sh is piped (curl ... | bash) or has its stdin redirected, a plain
+# `read` hits EOF and returns immediately -- without even printing its prompt --
+# so every question silently takes its default and the script races past them.
+# Reading /dev/tty keeps the questions working in those cases.
+# `[ -r /dev/tty ]` is not enough: the node can exist and still fail to open
+# when the process has no controlling terminal, so actually try to open it.
+if { : < /dev/tty; } 2>/dev/null; then
+  TTY_OK=1
+else
+  TTY_OK=0
+fi
+
+ask() {
+  local prompt="$1" var="$2"
+  if [ "$TTY_OK" = "1" ]; then
+    read -r -p "$prompt" "$var" < /dev/tty || true
+  else
+    read -r -p "$prompt" "$var" || true
+  fi
+}
+
+ask_secret() {
+  local prompt="$1" var="$2"
+  if [ "$TTY_OK" = "1" ]; then
+    read -r -s -p "$prompt" "$var" < /dev/tty || true
+  else
+    read -r -s -p "$prompt" "$var" || true
+  fi
+  echo
+}
 
 # ---------------------------------------------------------------- dependencies
 
@@ -61,7 +94,7 @@ install_deps_linux() {
     say "Installing dependencies with dnf (sudo required)..."
     sudo dnf install -y jq ffmpeg git curl python3 python3-pip
   else
-    warn "No apt-get or dnf found. Install jq, git, curl and python3 yourself."
+    warn "No apt-get or dnf found. Install jq, ffmpeg, git, curl and python3 yourself."
   fi
   if ! command -v yt-dlp >/dev/null 2>&1; then
     say "Installing yt-dlp via pip..."
@@ -229,7 +262,8 @@ def get_resource(client_secrets_file, credentials_file, get_code_callback=None):
         return googleapiclient.discovery.build("youtube", "v3", http=http)
 AUTH_EOF
 
-"$YT_UPLOAD_HOME/venv/bin/python" -c 'from youtube_upload import auth; auth.console; auth.DEFAULT_LOOPBACK_PORTS' \
+"$YT_UPLOAD_HOME/venv/bin/python" -c \
+  'from youtube_upload import auth; auth.console; auth.DEFAULT_LOOPBACK_PORTS' \
   || die "The patched auth module does not import."
 say "OAuth flow patched."
 
@@ -301,9 +335,8 @@ pick_client_secrets_file() {
 
 write_client_secrets_manually() {
   local id secret
-  read -r -p "YouTube OAuth client ID: " id
-  read -r -s -p "YouTube OAuth client secret: " secret
-  echo
+  ask        "YouTube OAuth client ID: " id
+  ask_secret "YouTube OAuth client secret: " secret
   [ -n "$id" ] && [ -n "$secret" ] || die "Both the client ID and secret are required."
 
   umask 077
@@ -324,37 +357,24 @@ JSON
 }
 
 write_client_secrets() {
-  local src="" reply
+  local src=""
   echo
-  echo "YouTube Data API OAuth credentials are needed to upload."
-  echo
-  echo "In the Google Cloud console:"
-  echo "  1. Enable the YouTube Data API v3 for your project."
-  echo "  2. Under Credentials, create an OAuth 2.0 Client ID of type"
-  echo "     \"Desktop app\". That type permits the loopback redirect this"
-  echo "     tool uses; \"TVs and Limited Input devices\" will not work."
-  echo "  3. Download that client's JSON."
-  echo
-
   if open_url "$CONSOLE_URL"; then
     say "Opened $CONSOLE_URL in your browser."
   else
     say "Open this in your browser: $CONSOLE_URL"
   fi
   echo
-  read -r -p "Press Enter once you have downloaded the client JSON... " _
-  echo
 
   # A file dialog is the easy path, but it only exists on a macOS desktop.
-  # Anywhere else -- Linux, or over SSH with no window server -- fall straight
-  # through to entering the client id and secret by hand.
+  # Anywhere else -- Linux, or over SSH with no window server -- fall through
+  # to entering the client id and secret by hand.
   if [ "$(uname -s)" = "Darwin" ] && command -v osascript >/dev/null 2>&1; then
-    read -r -p "Pick the downloaded JSON with a file dialog? [Y/n] " reply
-    case "$reply" in
-      [nN]*) ;;
-      *) src=$(pick_client_secrets_file)
-         [ -n "$src" ] || warn "No file chosen; enter the credentials by hand instead." ;;
-    esac
+    ask "Press Enter once you have downloaded the client JSON to pick it... " _
+    src=$(pick_client_secrets_file)
+    [ -n "$src" ] || warn "No file chosen; enter the credentials by hand instead."
+  else
+    ask "Press Enter once you have created the OAuth client... " _
   fi
 
   if [ -n "$src" ]; then
@@ -365,7 +385,7 @@ write_client_secrets() {
 }
 
 if [ -f "$CLIENT_SECRETS" ]; then
-  read -r -p "client_secrets.json already exists. Replace it? [y/N] " reply
+  ask "client_secrets.json already exists. Replace it? [y/N] " reply
   case "$reply" in
     [yY]*) write_client_secrets ;;
     *)     say "Keeping existing client_secrets.json." ;;
@@ -551,9 +571,9 @@ cat <<DONE
 
 $(say "Setup complete.")
 
-  script      : $RMX
+  script        : $RMX
   youtube-upload: $YT_UPLOAD_BIN
-  credentials : $CLIENT_SECRETS
+  credentials   : $CLIENT_SECRETS
 
 Open a new terminal (or run: source ~/.zshrc), then:
 
