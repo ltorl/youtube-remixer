@@ -14,6 +14,11 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 YT_UPLOAD_HOME="${YT_UPLOAD_HOME:-$HOME/youtube-upload}"
 YT_UPLOAD_REPO="https://github.com/tokland/youtube-upload.git"
+# Where the `rmx` executable is installed. ~/.local/bin is the conventional
+# per-user bin dir and needs no sudo; /usr/bin is SIP-protected on macOS and
+# not writable at all. Override with RMX_BIN_DIR=/usr/local/bin if you would
+# rather install system-wide (that one may need sudo).
+BIN_DIR="${RMX_BIN_DIR:-$HOME/.local/bin}"
 CONSOLE_URL="https://console.cloud.google.com/apis/dashboard"
 
 say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -394,12 +399,13 @@ else
   write_client_secrets
 fi
 
-# -------------------------------------------------------------- generate rmx
+# -------------------------------------------------------------- install rmx
 
-RMX="$REPO_DIR/rmx.sh"
+RMX="$BIN_DIR/rmx"
+mkdir -p "$BIN_DIR"
 if [ -f "$RMX" ]; then
   cp "$RMX" "$RMX.bak.$(date +%Y%m%d%H%M%S)"
-  say "Backed up the existing rmx.sh"
+  say "Backed up the existing $RMX"
 fi
 
 say "Writing $RMX"
@@ -411,7 +417,8 @@ cat > "$RMX" <<'RMX_EOF'
 #   rmx <url>              re-upload one video
 #   rmx --playlist <url>   re-upload every video in a playlist
 #
-# Paths can be overridden with YT_UPLOAD_HOME.
+# Installed by setup.sh. Paths can be overridden with YT_UPLOAD_HOME
+# and RMX_CLIENT_SECRETS.
 
 PLAYLIST=0
 URL=""
@@ -431,7 +438,7 @@ if [ -z "$URL" ]; then
   fi
 fi
 
-YT_UPLOAD_HOME="${YT_UPLOAD_HOME:-$HOME/youtube-upload}"
+YT_UPLOAD_HOME="${YT_UPLOAD_HOME:-@YT_UPLOAD_HOME@}"
 CLIENT_SECRETS="${RMX_CLIENT_SECRETS:-$YT_UPLOAD_HOME/client_secrets.json}"
 
 # youtube-upload is installed in a venv, so prefer that over PATH.
@@ -530,11 +537,23 @@ else
   repost "$URL"
 fi
 RMX_EOF
+
+# Bake in the youtube-upload location this setup actually used, so the
+# installed executable does not depend on it sitting under $HOME.
+sed -i.tmp "s|@YT_UPLOAD_HOME@|$YT_UPLOAD_HOME|" "$RMX" && rm -f "$RMX.tmp"
 chmod +x "$RMX"
+# `grep -q ... && die` would return non-zero on the success path and, under
+# `set -e`, kill the script exactly when substitution worked.
+if grep -q '@YT_UPLOAD_HOME@' "$RMX"; then
+  die "Failed to substitute the youtube-upload path into $RMX."
+fi
+# --------------------------------------------------------------- PATH entry
+#
+# rmx is a real executable now, so the rc file only has to make sure its
+# directory is on PATH. Earlier versions of this script installed an rmx()
+# shell function inside the same markers; rewriting the block removes it.
 
-# ------------------------------------------------------------ shell shortcut
-
-add_shortcut() {
+add_path_entry() {
   local rc="$1"
   local marker="# >>> rmx shortcut >>>"
   [ -f "$rc" ] || touch "$rc"
@@ -545,24 +564,27 @@ add_shortcut() {
     awk '/# >>> rmx shortcut >>>/{skip=1} !skip{print} /# <<< rmx shortcut <<</{skip=0}' "$rc" > "$tmp"
     mv "$tmp" "$rc"
   elif grep -qE '^[[:space:]]*rmx\(\)' "$rc"; then
-    warn "$rc already defines an rmx function outside the managed block; leaving it, appending ours after it."
+    warn "$rc defines an rmx function outside the managed block; it will shadow"
+    warn "$RMX. Remove it by hand."
   fi
   cat >> "$rc" <<RC
 
 # >>> rmx shortcut >>>
-export YT_UPLOAD_HOME="$YT_UPLOAD_HOME"
-rmx() { ( cd "\$YT_UPLOAD_HOME" && source "\$YT_UPLOAD_HOME/venv/bin/activate" && "$RMX" "\$@" ) }
+case ":\$PATH:" in
+  *":$BIN_DIR:"*) ;;
+  *) export PATH="$BIN_DIR:\$PATH" ;;
+esac
 # <<< rmx shortcut <<<
 RC
-  say "Added the rmx shortcut to $rc"
+  say "Put $BIN_DIR on PATH in $rc"
 }
 
 case "$(basename "${SHELL:-/bin/bash}")" in
-  zsh)  add_shortcut "$HOME/.zshrc" ;;
-  bash) add_shortcut "$HOME/.bashrc" ;;
-  *)    warn "Unrecognized shell '$SHELL'; adding the shortcut to ~/.zshrc and ~/.bashrc."
-        add_shortcut "$HOME/.zshrc"
-        add_shortcut "$HOME/.bashrc" ;;
+  zsh)  add_path_entry "$HOME/.zshrc" ;;
+  bash) add_path_entry "$HOME/.bashrc" ;;
+  *)    warn "Unrecognized shell '$SHELL'; updating both ~/.zshrc and ~/.bashrc."
+        add_path_entry "$HOME/.zshrc"
+        add_path_entry "$HOME/.bashrc" ;;
 esac
 
 # ---------------------------------------------------------------------- done
@@ -571,11 +593,11 @@ cat <<DONE
 
 $(say "Setup complete.")
 
-  script        : $RMX
+  rmx           : $RMX
   youtube-upload: $YT_UPLOAD_BIN
   credentials   : $CLIENT_SECRETS
 
-Open a new terminal (or run: source ~/.zshrc), then:
+Open a new terminal (or run: source ~/.zshrc) so PATH picks it up, then:
 
   rmx https://www.youtube.com/shorts/XXXXXXXXXXX
   rmx --playlist https://www.youtube.com/playlist?list=XXXXXXXX
