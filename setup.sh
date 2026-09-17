@@ -589,19 +589,5 @@ esac
 
 # ---------------------------------------------------------------------- done
 
-cat <<DONE
-
-$(say "Setup complete.")
-
-  rmx           : $RMX
-  youtube-upload: $YT_UPLOAD_BIN
-  credentials   : $CLIENT_SECRETS
-
-Open a new terminal (or run: source ~/.zshrc) so PATH picks it up, then:
-
-  rmx https://www.youtube.com/shorts/XXXXXXXXXXX
-  rmx --playlist https://www.youtube.com/playlist?list=XXXXXXXX
-
-The first upload opens a browser to authorize the OAuth client; the token is
-cached in ~/.youtube-upload-credentials.json after that.
-DONE
+echo
+say "Setup complete."
